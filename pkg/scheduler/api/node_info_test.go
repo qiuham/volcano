@@ -328,6 +328,11 @@ func buildNodeInfoWithNuma(numaInfo *NumatopoInfo, unassigned map[PodMeta]ResNum
 	ni := NewNodeInfo(buildNode("n1", nil, BuildResourceList("4000m", "4G")))
 	ni.NumaInfo = numaInfo
 	ni.UnassignedNumaPods = unassigned
+	for podMeta := range unassigned {
+		pod := buildPod(podMeta.Namespace, podMeta.Name, "n1", v1.PodRunning, nil, nil, nil)
+		pod.UID = podMeta.UID
+		ni.Tasks[TaskID(podMeta.UID)] = NewTaskInfo(pod)
+	}
 	return ni
 }
 
@@ -398,6 +403,7 @@ func TestRefreshNumaSchedulerInfoByCrd_RemovesStaleUnassignedPod(t *testing.T) {
 	ni := buildNodeInfoWithNuma(numaInfo, map[PodMeta]ResNumaSets{
 		stalePod: {"cpu": cpuset.New(0, 1)},
 	})
+	delete(ni.Tasks, TaskID(stalePod.UID))
 	if err := ni.AddTask(NewTaskInfo(currentPod)); err != nil {
 		t.Fatalf("add current task: %v", err)
 	}

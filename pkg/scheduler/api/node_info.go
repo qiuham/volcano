@@ -197,12 +197,10 @@ func (ni *NodeInfo) RefreshNumaSchedulerInfoByCrd() {
 		// A scheduling session can finish after the pod delete event and add its
 		// pre-occupancy record back. Drop records whose task is no longer present
 		// so a missed/reordered informer event cannot permanently reserve CPUs.
-		if len(ni.Tasks) > 0 {
-			if _, taskExists := ni.Tasks[TaskID(podMeta.UID)]; !taskExists {
-				delete(ni.UnassignedNumaPods, podMeta)
-				klog.V(3).Infof("removed stale unassigned pod %v from node %s", podMeta, ni.Name)
-				continue
-			}
+		if _, taskExists := ni.Tasks[TaskID(podMeta.UID)]; !taskExists {
+			delete(ni.UnassignedNumaPods, podMeta)
+			klog.V(3).Infof("removed stale unassigned pod %v from node %s", podMeta, ni.Name)
+			continue
 		}
 		if !ni.NumaInfo.CheckNumaPodAssigned(podMeta) {
 			klog.V(3).Infof("pod %v is scheduled to node %s, but has not been assigned numa resources, will pre-occupy resources %v", podMeta, ni.Name, resSets)
