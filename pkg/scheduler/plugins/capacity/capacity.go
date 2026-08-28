@@ -621,8 +621,21 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 		var victims []*api.TaskInfo
 		allocations := map[api.QueueID]*api.Resource{}
 		for _, reclaimee := range candidates {
+			if reclaimee == nil {
+				continue
+			}
 			job := ssn.Jobs[reclaimee.Job]
+			if job == nil {
+				klog.Warningf("[capacity] Skip reclaimee <%s/%s>: job <%s> not found in session",
+					reclaimee.Namespace, reclaimee.Name, reclaimee.Job)
+				continue
+			}
 			attr := cp.queueOpts[job.Queue]
+			if attr == nil {
+				klog.Warningf("[capacity] Skip reclaimee <%s/%s>: queue <%s> not found in queueOpts",
+					reclaimee.Namespace, reclaimee.Name, job.Queue)
+				continue
+			}
 			if _, found := allocations[job.Queue]; !found {
 				allocations[job.Queue] = attr.allocated.Clone()
 			}
@@ -651,7 +664,15 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			return false
 		}
 
-		queue := obj.(*api.QueueInfo)
+		queue, ok := obj.(*api.QueueInfo)
+		if !ok || queue == nil {
+			klog.Warningf("[capacity] Skip preemption: queue object is invalid")
+			return false
+		}
+		if queue == nil || queue.Queue == nil {
+			klog.Warningf("[capacity] Skip preemption: queue is nil")
+			return false
+		}
 		if queue.Queue.Status.State != scheduling.QueueStateOpen {
 			klog.V(3).Infof("Queue <%s> current state: %s, is not open state, can not reclaim for tasks.",
 				queue.Name, queue.Queue.Status.State)
@@ -659,6 +680,10 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 		}
 
 		attr := cp.queueOpts[queue.UID]
+		if attr == nil {
+			klog.Warningf("[capacity] Skip preemption: queue <%s> not found in queueOpts", queue.Name)
+			return false
+		}
 		totalReq := api.EmptyResource()
 		for _, task := range candidates {
 			if task != nil {
@@ -715,6 +740,9 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 	})
 
 	ssn.AddAllocatableFn(cp.Name(), func(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
+		if queue == nil || queue.Queue == nil || candidate == nil {
+			return false
+		}
 		if queue.Queue.Status.State != scheduling.QueueStateOpen {
 			klog.V(3).Infof("Queue <%s> current state: %s, cannot allocate task <%s>.", queue.Name, queue.Queue.Status.State, candidate.Name)
 			return false
@@ -745,7 +773,11 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			return util.Reject
 		}
 
-		job := obj.(*api.JobInfo)
+		job, ok := obj.(*api.JobInfo)
+		if !ok || job == nil || job.PodGroup == nil {
+			klog.Warningf("[capacity] Reject enqueue: job or PodGroup is nil")
+			return util.Reject
+		}
 		queueID := job.Queue
 		if hierarchyEnabled && !cp.isLeafQueue(queueID) {
 			return util.Reject
@@ -753,6 +785,11 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 
 		attr := cp.queueOpts[queueID]
 		queue := ssn.Queues[queueID]
+		if attr == nil || queue == nil || queue.Queue == nil {
+			klog.Warningf("[capacity] Reject enqueue for job <%s/%s>: queue <%s> is unavailable",
+				job.Namespace, job.Name, queueID)
+			return util.Reject
+		}
 		// If the queue is not open, do not enqueue
 		if queue.Queue.Status.State != scheduling.QueueStateOpen {
 			klog.V(3).Infof("Queue <%s> current state: %s, is not open state, reject job <%s/%s>.",
@@ -876,6 +913,9 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 	ssn.AddSimulateAllocatableFn(cp.Name(), func(ctx context.Context, cycleState fwk.CycleState, queue *api.QueueInfo, candidate *api.TaskInfo) bool {
 		state, err := getCapacityState(cycleState)
 		if err != nil {
+			return false
+		}
+		if queue == nil || candidate == nil || state.queueAttrs[queue.UID] == nil {
 			return false
 		}
 
@@ -1053,6 +1093,11 @@ func (cp *capacityPlugin) buildQueueAttrs(ssn *framework.Session) {
 		klog.V(4).Infof("Considering Job <%s/%s>.", job.Namespace, job.Name)
 		if _, found := cp.queueOpts[job.Queue]; !found {
 			queue := ssn.Queues[job.Queue]
+			if queue == nil || queue.Queue == nil {
+				klog.Warningf("[capacity] Skip job <%s/%s>: queue <%s> not found in session",
+					job.Namespace, job.Name, job.Queue)
+				continue
+			}
 			attr := &queueAttr{
 				queueID: queue.UID,
 				name:    queue.Name,
@@ -1091,6 +1136,11 @@ func (cp *capacityPlugin) buildQueueAttrs(ssn *framework.Session) {
 		}
 
 		attr := cp.queueOpts[job.Queue]
+		if attr == nil {
+			klog.Warningf("[capacity] Skip job <%s/%s>: queue <%s> attributes are unavailable",
+				job.Namespace, job.Name, job.Queue)
+			continue
+		}
 		for status, tasks := range job.TaskStatusIndex {
 			if api.AllocatedStatus(status) {
 				for _, t := range tasks {
@@ -1542,6 +1592,15 @@ func (cp *capacityPlugin) checkHierarchicalQueue(attr *queueAttr) {
 // queues with non-empty deserved are prioritized over best-effort queues.
 // Returns negative if l should come before r.
 func (cp *capacityPlugin) compareShareWithDeserved(lattr, rattr *queueAttr) int {
+	if lattr == nil {
+		if rattr == nil {
+			return 0
+		}
+		return 1
+	}
+	if rattr == nil {
+		return -1
+	}
 	if lattr.share == rattr.share {
 		lHasDeserved := !lattr.deserved.IsEmpty()
 		rHasDeserved := !rattr.deserved.IsEmpty()
@@ -1566,10 +1625,14 @@ func (cp *capacityPlugin) updateShare(attr *queueAttr) {
 }
 
 func (cp *capacityPlugin) isLeafQueue(queueID api.QueueID) bool {
-	return len(cp.queueOpts[queueID].children) == 0
+	attr := cp.queueOpts[queueID]
+	return attr != nil && len(attr.children) == 0
 }
 
 func (cp *capacityPlugin) queueAllocatable(queue *api.QueueInfo, candidate *api.TaskInfo, draEnabled bool, consumableCapacityEnabled bool) bool {
+	if queue == nil || candidate == nil {
+		return false
+	}
 	attr := cp.queueOpts[queue.UID]
 	return cp.queueAllocatableWithReserved(attr, candidate, queue, draEnabled, consumableCapacityEnabled)
 }
@@ -1627,6 +1690,9 @@ func (cp *capacityPlugin) buildQueueReservedTasksCache(ssn *framework.Session) {
 }
 
 func (cp *capacityPlugin) queueAllocatableWithReserved(attr *queueAttr, candidate *api.TaskInfo, queue *api.QueueInfo, draEnabled bool, consumableCapacityEnabled bool) bool {
+	if attr == nil || candidate == nil || queue == nil {
+		return false
+	}
 	if draEnabled && attr.dra != nil {
 		candidateDRA := incrementalTaskDRA(attr, candidate)
 		if candidateDRA != nil {
@@ -1660,8 +1726,15 @@ func (cp *capacityPlugin) queueAllocatableWithReserved(attr *queueAttr, candidat
 }
 
 func (cp *capacityPlugin) checkQueueAllocatableHierarchically(ssn *framework.Session, queue *api.QueueInfo, candidate *api.TaskInfo) bool {
+	if queue == nil || candidate == nil {
+		return false
+	}
+	attr := cp.queueOpts[queue.UID]
+	if attr == nil {
+		return false
+	}
 	// If hierarchical queue is not enabled, list will only contain the queue itself.
-	list := append(cp.queueOpts[queue.UID].ancestors, queue.UID)
+	list := append(attr.ancestors, queue.UID)
 	// Check whether the candidate task can be allocated to the queue and all its ancestors.
 	for i := len(list) - 1; i >= 0; i-- {
 		if !cp.queueAllocatable(ssn.Queues[list[i]], candidate, cp.dynamicResourceAllocationEnable, cp.draConsumableCapacityEnable) {

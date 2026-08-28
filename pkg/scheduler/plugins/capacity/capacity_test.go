@@ -1988,3 +1988,20 @@ func TestCheckDRAAllocatable_overflowRejected(t *testing.T) {
 		t.Fatalf("checkDRAAllocatable rejected a valid request (4 <= 8); want admitted")
 	}
 }
+
+func TestCapacityNilSafety(t *testing.T) {
+	cp := &capacityPlugin{queueOpts: map[api.QueueID]*queueAttr{}}
+
+	if cp.isLeafQueue("missing") {
+		t.Fatal("missing queue must not be treated as a leaf")
+	}
+	if cp.queueAllocatable(nil, nil, false, false) {
+		t.Fatal("nil queue and candidate must not be allocatable")
+	}
+	if cp.queueAllocatableWithReserved(nil, nil, nil, false, false) {
+		t.Fatal("nil queue attributes must not be allocatable")
+	}
+	if got := cp.compareShareWithDeserved(nil, nil); got != 0 {
+		t.Fatalf("two missing queue attributes should compare equal, got %d", got)
+	}
+}
