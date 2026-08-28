@@ -44,6 +44,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/plugins/gang"
 	"volcano.sh/volcano/pkg/scheduler/plugins/predicates"
 	"volcano.sh/volcano/pkg/scheduler/plugins/priority"
+	pluginutil "volcano.sh/volcano/pkg/scheduler/plugins/util"
 	"volcano.sh/volcano/pkg/scheduler/uthelper"
 	"volcano.sh/volcano/pkg/scheduler/util"
 )
@@ -393,6 +394,57 @@ func Test_capacityPlugin_OnSessionOpenWithoutHierarchy(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+type capacityJobRejecter struct{}
+
+func (p *capacityJobRejecter) Name() string { return "capacity-job-rejecter" }
+
+func (p *capacityJobRejecter) OnSessionOpen(ssn *framework.Session) {
+	ssn.AddJobEnqueueableFn(p.Name(), func(obj interface{}) int {
+		job, ok := obj.(*api.JobInfo)
+		if ok && job != nil && job.Name == "pgA" {
+			return pluginutil.Reject
+		}
+		return pluginutil.Permit
+	})
+}
+
+func (p *capacityJobRejecter) OnSessionClose(*framework.Session) {}
+
+func TestCapacityJobEnqueuedAccountingWaitsForFinalVerdict(t *testing.T) {
+	trueValue := true
+	res := api.BuildResourceList("1", "1G")
+	node := util.BuildNode("n1", api.BuildResourceList("4", "4G", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil)
+	queue := util.BuildQueueWithResourcesQuantity("q1", res, res)
+	podA := util.BuildPod("ns1", "podA", "", corev1.PodPending, res, "pgA", nil, nil)
+	podB := util.BuildPod("ns1", "podB", "", corev1.PodPending, res, "pgB", nil, nil)
+	pgA := util.BuildPodGroup("pgA", "ns1", "q1", 1, nil, schedulingv1beta1.PodGroupPending)
+	pgB := util.BuildPodGroup("pgB", "ns1", "q1", 1, nil, schedulingv1beta1.PodGroupPending)
+	pgA.Spec.MinResources = &res
+	pgB.Spec.MinResources = &res
+
+	test := uthelper.TestCommonStruct{
+		Name:      "a rejected by a co-tier plugin does not reserve q1 capacity",
+		Plugins:   map[string]framework.PluginBuilder{PluginName: New, "capacity-job-rejecter": func(framework.Arguments) framework.Plugin { return &capacityJobRejecter{} }},
+		Pods:      []*corev1.Pod{podA, podB},
+		Nodes:     []*corev1.Node{node},
+		PodGroups: []*schedulingv1beta1.PodGroup{pgA, pgB},
+		Queues:    []*schedulingv1beta1.Queue{queue},
+		ExpectStatus: map[api.JobID]scheduling.PodGroupPhase{
+			"ns1/pgB": scheduling.PodGroupInqueue,
+		},
+	}
+	tiers := []conf.Tier{{Plugins: []conf.PluginOption{
+		{Name: PluginName, EnabledJobEnqueued: &trueValue},
+		{Name: "capacity-job-rejecter", EnabledJobEnqueued: &trueValue},
+	}}}
+	test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{enqueue.New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
 	}
 }
 
