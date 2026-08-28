@@ -21,7 +21,9 @@ limitations under the License.
 package api
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
@@ -813,4 +815,77 @@ func TestGetMinDRAResourcesFallbackWithoutTaskMinAvailable(t *testing.T) {
 			Capacity: map[string]resource.Quantity{},
 		},
 	}, job.GetMinDRAResources())
+}
+
+func TestGetMinDRAResources_constantTimeForHugeTaskMinAvailable(t *testing.T) {
+	job := NewJobInfo("test-job")
+	job.TaskMinAvailable["worker"] = math.MaxInt32
+	job.Tasks[TaskID("worker-0")] = &TaskInfo{
+		UID:      TaskID("worker-0"),
+		Name:     "worker-0",
+		TaskRole: "worker",
+		DRAResreq: map[string]*DRAResource{
+			"gpu.com": {
+				Count:    1,
+				Capacity: map[string]resource.Quantity{"memory": resource.MustParse("2Gi")},
+			},
+		},
+	}
+
+	var result map[string]*DRAResource
+	done := make(chan struct{})
+	go func() {
+		result = job.GetMinDRAResources()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetMinDRAResources did not return for TaskMinAvailable=MaxInt32 within 5s; the unbounded capacity loop was reintroduced")
+	}
+
+	// MaxInt32 * 2Gi dwarfs 2Gi, so the multiply ran and was not dropped.
+	got := result["gpu.com"].Capacity["memory"]
+	if got.Cmp(resource.MustParse("1Ei")) <= 0 {
+		t.Fatalf("capacity = %s for TaskMinAvailable=MaxInt32; want much greater than 1Ei", got.String())
+	}
+}
+
+func newTaskWithStatus(uid string, status TaskStatus, nodeName string) *TaskInfo {
+	return &TaskInfo{
+		UID: TaskID(uid),
+		TransactionContext: TransactionContext{
+			Status:   status,
+			NodeName: nodeName,
+		},
+		Resreq: EmptyResource(),
+	}
+}
+
+func TestReleasingScheduledTaskNum(t *testing.T) {
+	jobInfo := NewJobInfo("job-1",
+		newTaskWithStatus("scheduled-1", Releasing, "node-1"),
+		newTaskWithStatus("unscheduled", Releasing, ""),
+		newTaskWithStatus("scheduled-2", Releasing, "node-2"),
+		newTaskWithStatus("running", Running, "node-3"),
+	)
+
+	if got, want := jobInfo.ReleasingScheduledTaskNum(), int32(2); got != want {
+		t.Fatalf("ReleasingScheduledTaskNum() = %v, want %v", got, want)
+	}
+}
+
+func TestScheduledTaskNum(t *testing.T) {
+	jobInfo := NewJobInfo("job-1",
+		newTaskWithStatus("running", Running, ""),
+		newTaskWithStatus("bound", Bound, ""),
+		newTaskWithStatus("failed", Failed, ""),
+		newTaskWithStatus("succeeded", Succeeded, ""),
+		newTaskWithStatus("pending", Pending, ""),
+		newTaskWithStatus("releasing", Releasing, ""),
+	)
+
+	if got, want := jobInfo.ScheduledTaskNum(), int32(4); got != want {
+		t.Fatalf("ScheduledTaskNum() = %v, want %v", got, want)
+	}
 }
