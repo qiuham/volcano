@@ -13,6 +13,8 @@
 # limitations under the License.
 
 FROM golang:1.25.0 AS builder
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /go/src/volcano.sh/
 COPY go.mod go.sum ./
 # Copy staging directory before go mod download since go.mod has replace directive
