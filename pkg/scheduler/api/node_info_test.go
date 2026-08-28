@@ -390,6 +390,28 @@ func TestRefreshNumaSchedulerInfoByCrd_UnassignedPodPreOccupiesResources(t *test
 	}
 }
 
+func TestRefreshNumaSchedulerInfoByCrd_RemovesStaleUnassignedPod(t *testing.T) {
+	numaInfo := newNumatopoInfoForTest(nil)
+	stalePod := PodMeta{UID: "stale-uid", Name: "deleted-pod", Namespace: "ns1"}
+	currentPod := buildPod("ns1", "current-pod", "n1", v1.PodRunning, BuildResourceList("1000m", "1G"), nil, nil)
+	currentPod.UID = "current-uid"
+	ni := buildNodeInfoWithNuma(numaInfo, map[PodMeta]ResNumaSets{
+		stalePod: {"cpu": cpuset.New(0, 1)},
+	})
+	if err := ni.AddTask(NewTaskInfo(currentPod)); err != nil {
+		t.Fatalf("add current task: %v", err)
+	}
+
+	ni.RefreshNumaSchedulerInfoByCrd()
+
+	if len(ni.UnassignedNumaPods) != 0 {
+		t.Fatalf("stale unassigned pod was retained: %+v", ni.UnassignedNumaPods)
+	}
+	if !ni.NumaSchedulerInfo.NumaResMap["cpu"].Allocatable.Equals(cpuset.New(0, 1, 2, 3)) {
+		t.Fatalf("stale record still changed NUMA capacity: %v", ni.NumaSchedulerInfo.NumaResMap["cpu"].Allocatable)
+	}
+}
+
 func TestRefreshNumaSchedulerInfoByCrd_MixedAssignedAndUnassigned(t *testing.T) {
 	numaInfo := newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{
 		{UID: "uid-1", Name: "p1", Namespace: "ns1"},
